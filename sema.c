@@ -4,6 +4,9 @@
  * Date Created : Oct 4th 2014 
  * Last updated : Oct 4th 2014
  * Description - Barber Shop problem with Semaphores and processes
+ * The Customer Generator is always running
+ * When customers come in, it dispatches the customer manager thread
+ * Which will 
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,9 +23,10 @@
 #include <sys/types.h>
 #include <semaphore.h>
 #include <fcntl.h>
-#define BARBER 10 
-#define CLIENTS 11
-#define NUMBER_OF_FREE_SEATS 10
+#define BARBER 208
+#define CLIENTS 209
+#define MAX_SEATS 10
+#define MAX_WALKIN_LENGTH 5
 #if !defined(_SEM_SEMUN_UNDEFINED) || _SEM_SEMUN_UNDEFINED
 /*Unions*/
 /* according to X/OPEN we have to define it ourselves */
@@ -40,14 +44,15 @@ typedef struct {
 } BarberShop ;
 
 typedef struct {
-	int clients[NUMBER_OF_FREE_SEATS];
-	int seats_left;
+	int clients[MAX_SEATS];
+	int seats_occupied;
+	int walkins;
 } Clients; 
 
 /*Processes*/
 void p(void);
 void v(void);
-
+void WelcomeUser(void);
 /*Customer Generation */
 Clients* GenerateCustomers(int);
 int BarberSleeps(int);
@@ -71,99 +76,136 @@ sem_t len;
 void *attach_shm(int, int);
 
 /*The master key numbers*/
-int BarberKey= 10;
-int ClientKey = 11;
-int LockKey = 12; //unused
+int BarberKey= 2;
+int ClientKey = 3;
+int LockKey = 32; //unused
 sem_t *lock1;
 
 /*Our Main Process*/
 int main (void){
-	/*We can contain 1 thread */
-	//sem_init(&lock, LockKey, 1);
-
-	/*Configure the semaphore to use it as a mutex */
-	lock1 = sem_open("pSem", O_CREAT , 0644, 1);
-	sem_unlink("pSem");
 
 	/*Get some semaphore keys for shared memory */
 	int BarberKey = make_sem(BARBER);
 	int ClientKey = make_sem(CLIENTS);
-
-	/*This could be a shared memory counter - not used */
-	init_semVal(1); //Semaphore with 2 initial values
-
 	int Barber = grab_shm(BARBER);
+
 	Clients *customers;
+	BarberShop* barberShop;
 
-	int rc;
-	int BarberWork = fork();
-    if (BarberWork == 0){
-    	/*Barber Process*/
-    	int shmid = grab_shm(CLIENTS);
-		customers = (Clients*) attach_shm(shmid, CLIENTS);
-	    while(1) {
-	    	BarberShop *barberShop;
-	    	barberShop = (BarberShop*) attach_shm(Barber, BARBER); //Attach the shared memory context
-	    	
-	    	/*This thread waites until it is dispatched*/
-	    	p(); 
-	    	/*If there are no customers, Barber goes to sleep*/
+    WelcomeUser();
+	lock1 = sem_open("pSema", O_CREAT | O_EXCL, 0644, 1);
+	if( lock1 == SEM_FAILED){
+		printf("Semaphore initialization Failed!\n");
+		exit(1);
+	}
+	sem_unlink("pSema");
+	/*Customer Generator Process */
+	int CustomerGenerate = fork();
+	if (CustomerGenerate == 0){
+		p();
+		while (1){
 			
-			if (customers->seats_left == NULL || customers->seats_left <= 0){
-				printf("No customers are here, Barber is going to sleep\n");
-				barberShop->working = 0;
-				p();
-				//On wakes up if a client walks in 
-			}
-			srand(time(NULL));
-			int max = 5;
-			int r = rand() % max;
-	    	printf("Barber is awake\n");
-	    	printf("Barber cutting hair for %d seconds\n", r);
-	    	sleep(r);
-	    	customers->seats_left--;
-
- 
-	    	barberShop->working = 1;
-	    	v(); //Release the process and allow for more seating
-
-	    }
-    }
-
-    else {
- 
-    	int CustomerGenerate = fork();
-    	if (CustomerGenerate == 0){
-    		p();
-
-    		while (1){
-    			customer = GenerateCustomers(10); //10 is the max amount of time we can wait
-    			if ()
-    			printf("Seats left = %d\n", customers->seats_left);
-    		}
-
-    	}
-    	else{
-    		//Seating the customers 
-    		p();
-    		sleep(1);
-    		int shmid = grab_shm(CLIENTS);
-			customers = (Clients*) attach_shm(shmid, CLIENTS);
-			barberShop = (BarberShop*) attach_shm(Barber, BARBER);
-
-    		p();
-    		while (1){
-    			printf("saaa");
-    		}
-
-
-
-    	}
+			customers = GenerateCustomers(MAX_WALKIN_LENGTH); //10 is the max amount of time we can wait
+			v();//Wake up the customer manager process
+		}
 
 	}
-	return 0;
-}
+	/*Customer Manager Process*/
+	int CustomerManager = fork();
+	if (CustomerManager == 0){
+		sleep(1);
+		/*This thread waites until it is dispatched*/
+		p(); //lock
+		printf("I am unlocked!!");
+		int shmid = grab_shm(CLIENTS);
+		//Grab our contexts 
+		customers = (Clients*) attach_shm(shmid, CLIENTS);
+		barberShop = (BarberShop*) attach_shm(Barber, BARBER);
+		while(1){
+			//The customer behavior. This thread only wakes up when it is called, 
+			if (customers->walkins > 0){
+				if ( (customers->walkins + customers->seats_occupied) > MAX_SEATS ){
+					int walkouts = (customers->seats_occupied + customers->walkins) - MAX_SEATS;
+					printf("%d people walked out\n", walkouts);
+					customers->seats_occupied = MAX_SEATS;
 
+				}
+				else {
+					//printf("There are %d new customers sitting in the waiting room\n", customers->walkins);
+					customers->seats_occupied += customers->walkins;
+				} 
+				//Deal with the barber 
+				if ( barberShop->working == 0 ) {
+					printf("Customer Manager wakes up barber");
+					v(); //wake up barber. He can do the rest
+					printf("Customer Manager going to sleep");
+					sleep(1);
+					p(); // go to sleep
+				}
+				else {
+					printf("Cusotmer Manager going to sleep");
+					p(); //go back to sleep
+				}					
+			}
+		
+		}
+	}
+	/*Barber Process*/
+	int BarberWork = fork();
+	if (BarberWork == 0){
+
+		int shmid = grab_shm(CLIENTS);
+		customers = (Clients*) attach_shm(shmid, CLIENTS);
+		/*Barber shm*/
+	    BarberShop *barberShop;
+	   	barberShop = (BarberShop*) attach_shm(Barber, BARBER); //Attach the shared memory context
+	    while(1) {
+	    	/*This thread waites until it is dispatched*/
+	    	sleep(2);
+	    	p(); 
+	    	/*If there are no customers, Barber goes to sleep*/
+			while (1){
+				if (customers->seats_occupied == NULL || customers->seats_occupied <= 0){
+					printf("No customers are here, Barber is going to sleep\n");
+					barberShop->working = 0;
+					p();
+				}
+				else if (barberShop->working == 0){
+					srand(time(NULL));
+					int max = 3;
+					int r = rand() % max;
+			    	printf("Barber wakes up, and gets the next customer from the waiting room!\n Barber starts cutting hair for %d seconds\n", r);
+			    	sleep(r);
+			    	printf("Barber finished and goes to get another customer from the waiting room\n");
+			    	customers->seats_occupied--;
+					barberShop->working = 1;
+			    }
+			    else {
+			    	srand(time(NULL));
+					int max = 3;
+					int r = 2 + rand() % max;
+			    	printf("Barber gets Customer.\n Barber Starts Cutting Hair\n");
+			    	sleep(r);
+			    	customers->seats_occupied--;
+			    	printf("Barber finished and goes to get another customer from the waiting room\n");
+			    	printf("There are %d customers left\n", customers->seats_occupied);	 
+		    		barberShop->working = 1;
+			    }
+		    }
+	    }
+	}
+	printf("PRESS Q AT ANY TIME TO EXIT\n");
+	char a = 'v';
+	while( a != 'Q') {
+		a = getchar();
+	}
+	printf("Program Exited Come Back to the Barber Shop Soon Now Ya hear?");
+	sleep(1);
+	kill(0, SIGKILL);
+
+	exit(1);
+}
+/*********************************************************************/
 /*****************Kernal Shared Memory*******************/
 /*
 * function : make_sem
@@ -193,7 +235,7 @@ int make_sem(int mode){
 }
 /*
 * function : init_sem
-* description : returns a semaphore ID
+* description : Treat a semaphore as a binary semaphore (as done above) and just set it to a value 
 * @param : ID of the Semaphore
 * @return : ID of the Semaphore
 */
@@ -202,7 +244,7 @@ void init_semVal(int val){
 	union semun sem_val;
 	/* Initialize the value to the input */
 	sem_val.val = val;
-	rc = 1;//semctl(MasterKey, 0, SETVAL, sem_val);
+	rc = semctl(BarberKey, 0, SETVAL, sem_val);
 	if (rc == -1) {
 		/* error occured */
 		perror("semctl");
@@ -234,10 +276,11 @@ int grab_shm(int mode ){
 	return shmid;
 }
 /*
-* function : init_sem
+* function : attach_schm
 * description : returns a semaphore ID
 * @param : ID of the Semaphore
 * @param : mode. This will determine which data structure it will create. 
+* return
 */
 void *attach_shm(int shmid, int mode){
 	void *ret;
@@ -261,19 +304,15 @@ void *attach_shm(int shmid, int mode){
 
 /*****************Process Signalling*******************/
 /*
-* function : init_sem
-* description : returns a semaphore ID
-* @param : ID of the Semaphore
-* @param : ID of the Semaphore
+* function : p()
+* description : Decrements the lock counter by 1
 */
 void p(){
 	sem_wait(lock1);
 }
 /*
-* function : GenerateCustomers
-* description : 
-* @param : int max
-* return :
+* function : v()
+* description : Increments the lock counter by 1
 */
 void v(){
 	sem_post(lock1);
@@ -284,19 +323,18 @@ void v(){
 * function : GenerateCustomers
 * description : GenerateCustomers
 * @param : int max
-* return :
+* return : Client Shared Memory Chunk
 */
 Clients *GenerateCustomers(int max){
 	srand(time(NULL));
-	//int r = rand() % max;;
-	int r = rand() % max;
-	sleep(r);
-	//Let's grab some shared memory for the customers
+	int r = 1 + rand() % max;
+	int sleeper = 8 + rand() % max;
+	sleep(sleeper + 2);
 	printf("%d Customers just walked in\n", r);
 	int shmid = grab_shm(CLIENTS);
 	Clients *ret = (Clients*) attach_shm(shmid, CLIENTS);
-	ret->seats_left += r;
-	printf("There are %d customers left", ret->seats_left);
+	
+	ret->walkins = r;
 	return ret;
 }
 
@@ -311,23 +349,18 @@ Clients *GenerateCustomers(int max){
 int BarberSleeps(int max){
 	srand(time(NULL));
 	int r = rand() % max;
-	printf("Barber now sleeping for %d seconds", r);
+	printf("Barber now sleeping for %d seconds\n", r);
 	sleep(r);
 	return r;
 }
-
-
-/****************SeatChair******************/
+/****************WelcomeUser******************/
 /*
-* function : GenerateCustomers
-* description : 
-* @param : int max
-* return :
+* function : WelcomeUser()
+* description : A brief hello message to tell the user what is going on in the program
 */
-int SeatChair(int max){
-	srand(time(NULL));
-	int r = rand() % max;
-	return r;
-}
 
+void WelcomeUser(void){
+    printf("Welcome to the Barber Shop\n");
+    printf("Shhhh! The barber is sleeping. The programs are waiting for the customers to come in\n");
+}
 
